@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: minha-api
+  namespace: minha-api
+spec:
+  selector:
+    app: minha-api
+  type: NodePort
+  ports:
+    - port: 3000
+      targetPort: 3000
+      nodePort: 30000    # exposto em localhost:3000 pelo k3d loadbalancer

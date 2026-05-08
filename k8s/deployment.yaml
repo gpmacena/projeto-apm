@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minha-api
+  namespace: minha-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: minha-api
+  template:
+    metadata:
+      labels:
+        app: minha-api
+        # Unified Service Tagging — o Agent lê estas labels para correlacionar
+        # métricas + traces + logs automaticamente
+        tags.datadoghq.com/service: "minha-api"
+        tags.datadoghq.com/env: "local"
+        tags.datadoghq.com/version: "1.0.0"
+      annotations:
+        # Habilita coleta de logs deste pod pelo Agent
+        ad.datadoghq.com/minha-api.logs: '[{"source":"nodejs","service":"minha-api"}]'
+    spec:
+      containers:
+        - name: minha-api
+          image: minha-api:latest
+          imagePullPolicy: Never    # usa imagem local importada pelo k3d
+          ports:
+            - containerPort: 3000
+          env:
+            # Aponta para o Agent no nó — status.hostIP resolve para o IP do nó
+            - name: DD_AGENT_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: DD_TRACE_AGENT_PORT
+              value: "8126"
+            # Unified Service Tagging via variável de ambiente
+            - name: DD_SERVICE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['tags.datadoghq.com/service']
+            - name: DD_ENV
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['tags.datadoghq.com/env']
+            - name: DD_VERSION
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['tags.datadoghq.com/version']
+            - name: DD_TRACE_ENABLED
+              value: "true"
+            - name: DD_LOGS_INJECTION
+              value: "true"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
