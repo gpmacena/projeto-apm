@@ -1,7 +1,6 @@
-# Datadog APM — Guia de Instrumentação Node.js
+# Datadog APM — Guia de Instrumentação Node.js no Kubernetes
 
-Aplicação de estudo para aprender instrumentação com Datadog APM.  
-Objetivo: entender traces, spans, métricas de runtime e correlação de logs antes de aplicar em ambiente com cluster.
+Aplicação de estudo para aprender instrumentação com Datadog APM em ambiente Kubernetes local (k3d), simulando um cluster real.
 
 ---
 
@@ -9,222 +8,250 @@ Objetivo: entender traces, spans, métricas de runtime e correlação de logs an
 
 ```
 aplication-apm/
-├── app.js              # Aplicação Express instrumentada
-├── load-generator.js   # Gerador de carga para popular o APM
+├── app.js                  # Aplicação Express (sem instrumentação — ponto de partida)
+├── load-generator.js       # Gerador de carga para popular o APM
 ├── package.json
-└── .env.example        # Variáveis de ambiente necessárias
+├── .env.example
+└── k8s/
+    ├── setup.sh            # Instala kubectl, k3d e helm
+    ├── Dockerfile          # Imagem da aplicação
+    ├── namespace.yaml
+    ├── deployment.yaml
+    ├── service.yaml
+    └── datadog-agent.yaml  # CR do Datadog Operator
 ```
 
 ---
 
-## Como o Datadog APM funciona (conceitos)
+## Como o Datadog APM funciona
 
 ```
-Requisição HTTP
-     │
-     ▼
-┌─────────────────────────────────────────┐
-│  TRACE  (representa toda a requisição)  │
-│                                         │
-│  ┌──────────────────────────────────┐   │
-│  │  SPAN raiz: express.request      │   │  ← criado automaticamente pelo dd-trace
-│  │  tags: http.method, http.url...  │   │
-│  │                                  │   │
-│  │  ┌────────────────────────────┐  │   │
-│  │  │  SPAN filho: db.query      │  │   │  ← criado manualmente ou auto (pg, mysql)
-│  │  │  tags: db.statement...     │  │   │
-│  │  └────────────────────────────┘  │   │
-│  │                                  │   │
-│  │  ┌────────────────────────────┐  │   │
-│  │  │  SPAN filho: http.external │  │   │
-│  │  └────────────────────────────┘  │   │
-│  └──────────────────────────────────┘   │
-└─────────────────────────────────────────┘
-         │
-         ▼
-   Datadog Agent (porta 8126)
-         │
-         ▼
-   Datadog Backend (app.datadoghq.com)
+Sua aplicação (Node.js)
+        │  envia traces via dd-trace
+        ▼
+Datadog Agent (DaemonSet no cluster — um pod por nó)
+        │  porta 8126 (APM) | 8125 (métricas)
+        ▼
+Datadog Backend (us5.datadoghq.com)
+        │
+        ▼
+APM → Traces / Services / Service Map
 ```
 
-**Trace** = jornada completa de uma requisição (tem um `trace_id`).  
-**Span** = uma operação dentro do trace (tem `span_id` e `parent_id`).  
+**Trace** = jornada completa de uma requisição (`trace_id`).  
+**Span** = uma operação dentro do trace (`span_id` + `parent_id`).  
 **Tag** = metadado chave:valor em qualquer span (ex: `pedido.id=42`).
 
 ---
 
 ## Pré-requisitos
 
-- Node.js 18+
-- Docker (para rodar o Datadog Agent localmente)
-- Conta no Datadog com API Key
+- Docker instalado
+- Conta no Datadog com API Key (`app.datadoghq.com → Organization Settings → API Keys`)
 
 ---
 
-## 1. Subir o Datadog Agent localmente
+## Parte 1 — Preparar o ambiente local
 
-O Agent recebe os traces da sua aplicação e os envia ao backend do Datadog.
-
-```bash
-docker run -d \
-  --name datadog-agent \
-  -e DD_API_KEY=<SUA_API_KEY> \
-  -e DD_APM_ENABLED=true \
-  -e DD_APM_NON_LOCAL_TRAFFIC=true \
-  -e DD_LOGS_ENABLED=true \
-  -e DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL=true \
-  -p 8126:8126/tcp \
-  -p 8125:8125/udp \
-  -v /var/run/docker.sock:/var/run/docker.sock:ro \
-  -v /proc/:/host/proc/:ro \
-  -v /sys/fs/cgroup/:/host/sys/fs/cgroup:ro \
-  gcr.io/datadoghq/agent:latest
-```
-
-Verificar se o Agent está aceitando traces:
-```bash
-curl http://localhost:8126/info
-```
-
-Deve retornar um JSON com versão e configurações do Agent.
-
----
-
-## 2. Instalar dependências
+### 1.1 Instalar kubectl, k3d e helm
 
 ```bash
-npm install
-cp .env.example .env
-# Edite o .env com sua configuração
+chmod +x k8s/setup.sh && ./k8s/setup.sh
 ```
 
----
-
-## 3. Configurar variáveis de ambiente
-
-Edite o `.env`:
-
-```env
-DD_AGENT_HOST=localhost
-DD_TRACE_AGENT_PORT=8126
-
-# Nome do serviço — aparece no Service Catalog do Datadog
-DD_SERVICE=minha-api
-
-# Ambiente — separa prod/staging/local no APM
-DD_ENV=local
-
-# Versão — permite comparar deployments no Deployment Tracking
-DD_VERSION=1.0.0
-
-DD_TRACE_ENABLED=true
-DD_LOGS_INJECTION=true
-```
-
-> **Por que DD_SERVICE importa?** No Datadog, o `service` é a unidade principal de agrupamento.
-> Tudo que você vê no APM (latência p99, taxa de erro, throughput) é por serviço.
-
----
-
-## 4. Iniciar a aplicação
+Ou manualmente:
 
 ```bash
-npm start
+# kubectl
+curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+chmod +x kubectl && sudo mv kubectl /usr/local/bin/kubectl
+
+# k3d
+curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+
+# helm
+curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 ```
 
-Saída esperada:
+### 1.2 Criar o cluster Kubernetes local
+
+```bash
+k3d cluster create apm-cluster --port "3000:30000@loadbalancer" --agents 1
+kubectl wait --for=condition=Ready nodes --all --timeout=90s
+kubectl get nodes
 ```
-Servidor rodando em http://localhost:3000
-DD_SERVICE=minha-api | DD_ENV=local
+
+Resultado esperado:
+```
+NAME                       STATUS   ROLES                  AGE
+k3d-apm-cluster-agent-0    Ready    <none>
+k3d-apm-cluster-server-0   Ready    control-plane,master
 ```
 
 ---
 
-## 5. Gerar tráfego para o APM
+## Parte 2 — Instalar o Datadog Agent no cluster
+
+### 2.1 No painel do Datadog (feito manualmente)
+
+1. Acesse `app.datadoghq.com`
+2. **Get Started → Infrastructure & backend applications**
+3. **Install the Datadog Agent on Kubernetes**
+4. Método: **Datadog Operator**
+5. Distribuição: **Self Managed**
+6. Coverage: marcar **APM** e **Log Management** | Environment: `local`
+
+### 2.2 Instalar o Datadog Operator via Helm
 
 ```bash
-# Envia 100 requisições com concorrência 5 (padrão)
-npm run load
-
-# Customizar: 500 requisições com concorrência 10
-node load-generator.js 500 10
+helm repo add datadog https://helm.datadoghq.com
+helm repo update
+helm install datadog-operator datadog/datadog-operator --namespace datadog --create-namespace
 ```
 
-Ou manualmente com curl:
+### 2.3 Criar o secret com a API Key
+
+> Substitua `<SUA_API_KEY>` pela key gerada em `Organization Settings → API Keys`
 
 ```bash
-# Rota saudável
+kubectl create secret generic datadog-secret \
+  --from-literal api-key=<SUA_API_KEY> \
+  -n datadog
+```
+
+### 2.4 Criar o arquivo do Agent
+
+O wizard do Datadog gera o conteúdo. O arquivo já está em `k8s/datadog-agent.yaml` com as configurações corretas para este projeto:
+
+```yaml
+kind: DatadogAgent
+apiVersion: datadoghq.com/v2alpha1
+metadata:
+  name: datadog
+  namespace: datadog
+spec:
+  global:
+    clusterName: "apm-cluster"
+    site: "us5.datadoghq.com"       # ajuste para o seu site (us1, eu1, etc.)
+    credentials:
+      apiSecret:
+        secretName: "datadog-secret"
+        keyName: "api-key"
+    tags:
+      - "env:local"
+  features:
+    apm:
+      instrumentation:
+        enabled: true
+        targets:
+          - name: "default-target"
+            ddTraceVersions:
+              js: "5"
+    logCollection:
+      enabled: true
+      containerCollectAll: true
+```
+
+Aplicar:
+```bash
+kubectl apply -f k8s/datadog-agent.yaml
+```
+
+### 2.5 Verificar se o Agent subiu
+
+```bash
+kubectl get pods -n datadog
+```
+
+Resultado esperado (aguardar ~2 minutos):
+```
+NAME                                     READY   STATUS
+datadog-agent-xxxxx                      2/2     Running
+datadog-agent-yyyyy                      2/2     Running
+datadog-cluster-agent-xxxxxxxxx-xxxxx    1/1     Running
+datadog-operator-xxxxxxxxx-xxxxx         1/1     Running
+```
+
+---
+
+## Parte 3 — Subir a aplicação no cluster
+
+### 3.1 Buildar a imagem e importar para o k3d
+
+```bash
+docker build -t minha-api:latest -f k8s/Dockerfile .
+k3d image import minha-api:latest --cluster apm-cluster
+```
+
+### 3.2 Aplicar os manifestos
+
+```bash
+kubectl apply -f k8s/namespace.yaml
+kubectl apply -f k8s/deployment.yaml
+kubectl apply -f k8s/service.yaml
+```
+
+### 3.3 Verificar se a aplicação subiu
+
+```bash
+kubectl rollout status deployment/minha-api -n minha-api
+kubectl get pods -n minha-api
+```
+
+### 3.4 Testar
+
+```bash
 curl http://localhost:3000/health
-
-# Rota com parâmetro (tag customizada no span)
-curl http://localhost:3000/produtos?categoria=eletronicos
-
-# Rota com múltiplos spans filhos (cascata no flame graph)
-curl http://localhost:3000/pedidos/1
-
-# Rota lenta (alta latência)
-curl http://localhost:3000/relatorio
-
-# Rota que sempre falha (gera span com error:true)
-curl http://localhost:3000/falha
-
-# Rota instável (~30% de erro)
-curl http://localhost:3000/instavel
+# {"status":"ok","timestamp":"..."}
 ```
 
 ---
 
-## 6. Ver os traces no Datadog
+## Parte 4 — Instrumentar com Datadog APM (do zero)
 
-1. Acesse: **APM → Traces** em `app.datadoghq.com`
-2. Filtre por `service:minha-api` e `env:local`
-3. Clique em qualquer trace para ver o **flame graph**
+> A aplicação em `app.js` está **sem instrumentação**. Este é o ponto de partida para o estudo.
 
-O que observar:
-- **Flame graph**: cascata de spans, duração de cada um
-- **Span mais lento**: `/relatorio` → span `db.query` com 800ms
-- **Spans com erro**: `/falha` e `/instavel` → marcados em vermelho
-- **Tags customizadas**: `pedido.id`, `produtos.filtro` aparecem nos detalhes do span
+### 4.1 Instalar o dd-trace
 
----
+```bash
+npm install dd-trace
+```
 
-## 7. Conceitos de instrumentação que esta app demonstra
-
-### 7.1 Inicialização do tracer (crítico)
+### 4.2 Inicializar o tracer (primeira linha do app.js)
 
 ```js
-// app.js — linha 1, ANTES de qualquer outro require
-const tracer = require('dd-trace').init({ ... });
+// DEVE ser o primeiro require — antes de express, http, etc.
+const tracer = require('dd-trace').init({
+  service: 'minha-api',
+  env: 'local',
+  version: '1.0.0',
+  logInjection: true,
+  runtimeMetrics: true,
+});
 ```
 
-Se `dd-trace` for inicializado depois do `express`, ele não consegue fazer
-o monkey-patch e as rotas não aparecem como spans automáticos.
-
-### 7.2 Span manual (span filho)
+### 4.3 Span manual (operação de banco, chamada externa, etc.)
 
 ```js
 const span = tracer.startSpan('db.query', {
-  childOf: tracer.scope().active(), // liga ao span pai atual
+  childOf: tracer.scope().active(),
   tags: {
     'db.type': 'postgresql',
-    'db.statement': 'SELECT ...',
+    'db.statement': 'SELECT * FROM produtos',
   },
 });
-await minhaQuery();
-span.finish(); // SEMPRE chame finish(), senão o span fica aberto
+await minhaOperacao();
+span.finish(); // sempre chame finish()
 ```
 
-### 7.3 Tags no span ativo
+### 4.4 Tag no span ativo (contexto de negócio)
 
 ```js
 const span = tracer.scope().active();
 span.setTag('pedido.id', req.params.id);
 ```
 
-Útil para adicionar contexto de negócio sem criar um span novo.
-
-### 7.4 Marcar erro no span
+### 4.5 Marcar erro no span
 
 ```js
 span.setTag('error', true);
@@ -233,88 +260,72 @@ span.setTag('error.type', err.constructor.name);
 span.setTag('error.stack', err.stack);
 ```
 
-Isso faz o span ficar vermelho no trace explorer e conta na taxa de erro do serviço.
-
-### 7.5 Correlação de logs com traces
-
-Com `DD_LOGS_INJECTION=true` e `logInjection: true` no init, o `dd-trace`
-injeta automaticamente `trace_id` e `span_id` nos logs (funciona com Winston e Pino).
-
-No Datadog Logs, você pode clicar em "Ver trace" direto do log.
-
----
-
-## 8. Aplicando em ambiente com cluster (próximo passo)
-
-### Kubernetes com Datadog Agent como DaemonSet
-
-No cluster, o Agent roda como DaemonSet — um pod por nó.
-Sua aplicação precisa saber o IP do nó para enviar traces.
-
-```yaml
-# deployment.yaml — adicionar nas variáveis de ambiente do container
-env:
-  - name: DD_AGENT_HOST
-    valueFrom:
-      fieldRef:
-        fieldPath: status.hostIP   # IP do nó onde o pod está rodando
-  - name: DD_TRACE_AGENT_PORT
-    value: "8126"
-  - name: DD_SERVICE
-    value: "minha-api"
-  - name: DD_ENV
-    value: "production"
-  - name: DD_VERSION
-    valueFrom:
-      fieldRef:
-        fieldPath: metadata.labels['tags.datadoghq.com/version']
-```
-
-### Unified Service Tagging (recomendado em cluster)
-
-O Datadog recomenda usar labels no pod para correlacionar métricas + traces + logs:
-
-```yaml
-# deployment.yaml — labels no pod
-labels:
-  tags.datadoghq.com/service: "minha-api"
-  tags.datadoghq.com/env: "production"
-  tags.datadoghq.com/version: "1.0.0"
-```
-
-Com isso, o Agent lê as labels e injeta as tags automaticamente — você não precisa
-de variáveis de ambiente separadas.
-
-### Helm Chart do Datadog Agent
+### 4.6 Rebuild e redeploy após instrumentar
 
 ```bash
-helm repo add datadog https://helm.datadoghq.com
-helm install datadog-agent datadog/datadog \
-  --set datadog.apiKey=<SUA_API_KEY> \
-  --set datadog.apm.portEnabled=true \
-  --set datadog.logs.enabled=true \
-  --set datadog.logs.containerCollectAll=true
+docker build -t minha-api:latest -f k8s/Dockerfile .
+k3d image import minha-api:latest --cluster apm-cluster
+kubectl rollout restart deployment/minha-api -n minha-api
+```
+
+### 4.7 Gerar tráfego
+
+```bash
+# De fora do cluster
+node load-generator.js 200 5
+
+# Ou de dentro do pod
+kubectl exec -n minha-api deploy/minha-api -- node load-generator.js 200 5
 ```
 
 ---
 
-## 9. O que monitorar no APM depois de instrumentado
+## Parte 5 — Ver os resultados no Datadog
 
-| O que ver | Onde no Datadog |
+Após gerar tráfego, acesse `app.datadoghq.com`:
+
+| O que ver | Onde |
 |---|---|
-| Latência p50/p95/p99 por rota | APM → Services → minha-api |
-| Taxa de erro por rota | APM → Services → minha-api → Errors |
-| Trace mais lento da última hora | APM → Traces → filtrar por duração |
-| Memória heap e GC do Node.js | APM → Services → Runtime Metrics |
-| Dependências entre serviços | APM → Service Map |
-| Correlação log ↔ trace | Logs → clicar em "View Trace" |
+| Traces e flame graph | APM → Traces → filtrar `service:minha-api` |
+| Latência p50/p95/p99 | APM → Services → minha-api |
+| Taxa de erro | APM → Services → minha-api → Errors |
+| Métricas de runtime Node.js | APM → Services → Runtime Metrics |
+| Mapa de dependências | APM → Service Map |
+| Logs correlacionados com traces | Logs → clicar em "View Trace" |
 
 ---
 
-## Referências
+## Rotas disponíveis para teste
 
-- [dd-trace-js no GitHub](https://github.com/DataDog/dd-trace-js)
-- [Documentação APM Node.js](https://docs.datadoghq.com/tracing/trace_collection/dd_libraries/nodejs/)
-- [Unified Service Tagging](https://docs.datadoghq.com/getting_started/tagging/unified_service_tagging/)
-- [Datadog Agent no Kubernetes](https://docs.datadoghq.com/containers/kubernetes/)
-# projeto-apm
+| Rota | O que simula |
+|---|---|
+| `GET /health` | Rota rápida — baseline de latência |
+| `GET /produtos?categoria=x` | Tag customizada no span |
+| `GET /pedidos/:id` | Múltiplos spans filhos em cascata |
+| `GET /relatorio` | Rota lenta (800ms) — aparece no p99 |
+| `GET /falha` | Erro controlado — span vermelho |
+| `GET /instavel` | ~30% de erro — taxa de erro variável |
+
+---
+
+## Comandos úteis do dia a dia
+
+```bash
+# Ver pods de tudo
+kubectl get pods -n datadog
+kubectl get pods -n minha-api
+
+# Logs da aplicação
+kubectl logs -n minha-api deploy/minha-api -f
+
+# Logs do Datadog Agent
+kubectl logs -n datadog -l app.kubernetes.io/component=agent -f
+
+# Reiniciar a aplicação após mudança de código
+docker build -t minha-api:latest -f k8s/Dockerfile . && \
+k3d image import minha-api:latest --cluster apm-cluster && \
+kubectl rollout restart deployment/minha-api -n minha-api
+
+# Destruir o cluster (recomeçar do zero)
+k3d cluster delete apm-cluster
+```
