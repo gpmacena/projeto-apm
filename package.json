@@ -1,0 +1,16 @@
+{
+  "name": "aplication-apm",
+  "version": "1.0.0",
+  "description": "App de estudo para instrumentação com Datadog APM",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "start:dd": "DD_TRACE_ENABLED=true node app.js",
+    "load": "node load-generator.js"
+  },
+  "dependencies": {
+    "dd-trace": "^5.x",
+    "express": "^4.18.2",
+    "dotenv": "^16.3.1"
+  }
+}
